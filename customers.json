@@ -1,0 +1,110 @@
+[
+  {
+    "id": "cust_001",
+    "name": "Arjun",
+    "loyalty_tier": "Gold",
+    "preferred_channel": "mobile_app",
+    "style_preferences": ["smart casual", "sneakers"],
+    "past_purchases": ["SKU123", "SKU400"],
+    "store_location": "Bangalore-Mall-01"
+  },
+  {
+    "id": "cust_002",
+    "name": "Priya",
+    "loyalty_tier": "Silver",
+    "preferred_channel": "website",
+    "style_preferences": ["ethnic wear", "heels"],
+    "past_purchases": ["SKU212", "SKU599"],
+    "store_location": "Mumbai-Central-02"
+  },
+  {
+    "id": "cust_003",
+    "name": "Rohit",
+    "loyalty_tier": "Bronze",
+    "preferred_channel": "whatsapp",
+    "style_preferences": ["streetwear", "sneakers"],
+    "past_purchases": ["SKU720"],
+    "store_location": "Delhi-Outlet-01"
+  },
+  {
+    "id": "cust_004",
+    "name": "Nisha",
+    "loyalty_tier": "Gold",
+    "preferred_channel": "mobile_app",
+    "style_preferences": ["formal wear", "blazers"],
+    "past_purchases": ["SKU102", "SKU301"],
+    "store_location": "Bangalore-Mall-02"
+  },
+  {
+    "id": "cust_005",
+    "name": "Aman",
+    "loyalty_tier": "Silver",
+    "preferred_channel": "kiosk",
+    "style_preferences": ["casual", "sports shoes"],
+    "past_purchases": ["SKU450"],
+    "store_location": "Hyderabad-Galleria-01"
+  },
+  {
+    "id": "cust_006",
+    "name": "Fatima",
+    "loyalty_tier": "Platinum",
+    "preferred_channel": "mobile_app",
+    "style_preferences": ["luxury wear", "bags"],
+    "past_purchases": ["SKU999", "SKU855"],
+    "store_location": "Mumbai-Central-02"
+  },
+  {
+    "id": "cust_007",
+    "name": "Dev",
+    "loyalty_tier": "Gold",
+    "preferred_channel": "website",
+    "style_preferences": ["smart casual", "loafers"],
+    "past_purchases": ["SKU411", "SKU721"],
+    "store_location": "Chennai-MegaMall-01"
+  },
+  {
+    "id": "cust_008",
+    "name": "Sakshi",
+    "loyalty_tier": "Bronze",
+    "preferred_channel": "mobile_app",
+    "style_preferences": ["activewear", "sandals"],
+    "past_purchases": ["SKU108"],
+    "store_location": "Pune-HighStreet-01"
+  },
+  {
+    "id": "cust_009",
+    "name": "Karan",
+    "loyalty_tier": "Silver",
+    "preferred_channel": "whatsapp",
+    "style_preferences": ["party wear", "boots"],
+    "past_purchases": ["SKU567", "SKU119"],
+    "store_location": "Delhi-Outlet-01"
+  },
+  {
+    "id": "cust_010",
+    "name": "Neha",
+    "loyalty_tier": "Gold",
+    "preferred_channel": "kiosk",
+    "style_preferences": ["denim", "bags"],
+    "past_purchases": ["SKU320", "SKU668"],
+    "store_location": "Hyderabad-Galleria-01"
+  },
+  {
+    "id": "cust_011",
+    "name": "Imran",
+    "loyalty_tier": "Bronze",
+    "preferred_channel": "mobile_app",
+    "style_preferences": ["athleisure", "sneakers"],
+    "past_purchases": ["SKU809"],
+    "store_location": "Bangalore-Mall-01"
+  },
+  {
+    "id": "cust_012",
+    "name": "Ayesha",
+    "loyalty_tier": "Gold",
+    "preferred_channel": "mobile_app",
+    "style_preferences": ["party wear", "heels"],
+    "past_purchases": ["SKU755", "SKU250"],
+    "store_location": "Mumbai-Central-02"
+  }
+]

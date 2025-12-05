@@ -5,14 +5,14 @@ const cors = require("cors");
 const bodyParser = require("body-parser");
 const { createClient } = require('@supabase/supabase-js');
 const OpenAI = require("openai");
-const MessagingResponse = require("twilio").twiml.MessagingResponse; // Added
+const MessagingResponse = require("twilio").twiml.MessagingResponse;
 
 const app = express();
 
-// Middleware
+// Middleware - FIXED: Added proper URL-encoded parsing for Twilio
 app.use(cors());
 app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.urlencoded({ extended: false })); // FIXED: For Twilio webhooks
 
 //router here
 const router = express.Router();
@@ -169,6 +169,62 @@ async function fetchCustomerById(customerId) {
     return data;
   } catch (err) {
     console.error("Fetch customer by ID exception:", err);
+    return null;
+  }
+}
+
+/**
+ * Find or create customer by WhatsApp phone number
+ */
+async function findOrCreateWhatsAppCustomer(phoneNumber) {
+  try {
+    console.log("🔍 Looking up WhatsApp customer with phone:", phoneNumber);
+    
+    // First, try to find existing customer by phone
+    const { data: existingCustomer, error: findError } = await supabase
+      .from("customers")
+      .select("*")
+      .eq("phone_number", phoneNumber)
+      .single();
+
+    if (!findError && existingCustomer) {
+      console.log("✅ Found existing customer:", existingCustomer.id);
+      return existingCustomer;
+    }
+
+    // If not found, create a new customer
+    console.log("📝 Creating new WhatsApp customer for phone:", phoneNumber);
+    
+    const newCustomerId = `cust_wa_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    const profileName = "WhatsApp User"; // Could be enhanced with WhatsApp profile name later
+    
+    const { data: newCustomer, error: createError } = await supabase
+      .from("customers")
+      .insert({
+        id: newCustomerId,
+        name: profileName,
+        phone_number: phoneNumber,
+        loyalty_tier: "bronze",
+        store_location: "Mumbai", // Default location
+        total_spend: 0,
+        last_seen_channel: "whatsapp",
+        session_context: {},
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+
+    if (createError) {
+      console.error("❌ Failed to create WhatsApp customer:", createError.message);
+      return null;
+    }
+
+    console.log("✅ Created new WhatsApp customer:", newCustomerId);
+    return newCustomer;
+    
+  } catch (err) {
+    console.error("❌ findOrCreateWhatsAppCustomer exception:", err);
     return null;
   }
 }
@@ -1273,30 +1329,87 @@ router.post("/retail-orchestrator", verifyUser, async (req, res) => {
 
 /**
  * POST /api/whatsapp - Twilio WhatsApp webhook endpoint
+ * NO verifyUser middleware - Twilio sends raw form data
  */
 router.post("/whatsapp", async (req, res) => {
   try {
+    // Log full webhook body for debugging
+    console.log("📥 WhatsApp webhook received - Full body:", req.body);
+    
+    // Extract WhatsApp data (Twilio sends form-urlencoded)
     const incomingMsg = req.body.Body || "";
-    console.log("📥 WhatsApp incoming:", incomingMsg);
+    const fromNumber = req.body.From || ""; // e.g., "whatsapp:+919876543210"
+    const profileName = req.body.ProfileName || "";
+    const waId = req.body.WaId || "";
+    
+    console.log("📱 WhatsApp details:", {
+      message: incomingMsg,
+      from: fromNumber,
+      profileName,
+      waId
+    });
 
-    // hard-bind a customer for demo (cust_001 = Arjun)
+    if (!incomingMsg.trim()) {
+      console.warn("⚠️ Empty WhatsApp message received");
+      const twiml = new MessagingResponse();
+      twiml.message("Hi! I didn't receive your message. How can I help you today?");
+      res.type("text/xml");
+      return res.send(twiml.toString());
+    }
+
+    // Extract phone number from Twilio format
+    let phoneNumber = fromNumber;
+    if (fromNumber.startsWith("whatsapp:")) {
+      phoneNumber = fromNumber.replace("whatsapp:", "");
+    }
+    
+    console.log("📞 Extracted phone number:", phoneNumber);
+
+    // Find or create customer based on WhatsApp phone number
+    const customer = await findOrCreateWhatsAppCustomer(phoneNumber);
+    
+    if (!customer) {
+      console.error("❌ Failed to find/create WhatsApp customer");
+      const twiml = new MessagingResponse();
+      twiml.message("Sorry, I'm having trouble accessing your account. Please try again later.");
+      res.type("text/xml");
+      return res.send(twiml.toString());
+    }
+
+    // Update profile name if available and not set
+    if (profileName && (!customer.name || customer.name === "WhatsApp User")) {
+      await supabase
+        .from("customers")
+        .update({ name: profileName })
+        .eq("id", customer.id);
+      console.log("👤 Updated customer name to:", profileName);
+    }
+
+    console.log("✅ Processing WhatsApp message for customer:", customer.id, customer.name);
+    
+    // Run the orchestrator
     const result = await runRetailOrchestrator(
-      incomingMsg,
-      "cust_001",          // change based on phone mapping later
+      incomingMsg.trim(),
+      customer.id,
       "whatsapp"
     );
 
+    // Send WhatsApp response
     const twiml = new MessagingResponse();
     twiml.message(result.reply);
     
     res.type("text/xml");
     res.send(twiml.toString());
 
+    console.log("✅ WhatsApp response sent successfully");
+
   } catch (err) {
     console.error("❌ WhatsApp webhook error:", err);
+    console.error("Stack trace:", err.stack);
+    
     const twiml = new MessagingResponse();
-    twiml.message("Oops! Something broke — try again.");
-
+    twiml.message("Oops! Something went wrong on our end. Please try again in a moment.");
+    
     res.type("text/xml");
     res.send(twiml.toString());
   }
@@ -1394,7 +1507,7 @@ app.listen(PORT, HOST, async () => {
    POST /api/cart            - Add to cart (requires auth)
    GET  /api/cart            - View cart (requires auth)
    POST /api/retail-orchestrator - Chat endpoint (requires auth)
-   POST /api/whatsapp        - WhatsApp webhook
+   POST /api/whatsapp        - WhatsApp webhook (no auth required)
    GET  /api/products        - Browse products
 ────────────────────────────────────────
   `);

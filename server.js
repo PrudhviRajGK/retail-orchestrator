@@ -82,7 +82,6 @@ try {
 
 /**
  * JWT Verification Middleware
- * Extracts and validates JWT from Authorization header
  */
 async function verifyUser(req, res, next) {
   try {
@@ -104,7 +103,6 @@ async function verifyUser(req, res, next) {
       });
     }
 
-    // Verify token with Supabase Auth
     const { data, error } = await supabase.auth.getUser(token);
     
     if (error || !data?.user) {
@@ -115,7 +113,6 @@ async function verifyUser(req, res, next) {
       });
     }
 
-    // Attach user to request
     req.authUser = data.user;
     next();
     
@@ -129,12 +126,9 @@ async function verifyUser(req, res, next) {
 }
 
 // ============================================================================
-// DATABASE HELPER FUNCTIONS
+// DATABASE HELPER FUNCTIONS (DEFINED FIRST!)
 // ============================================================================
 
-/**
- * Fetch customer by auth_user_id
- */
 async function fetchCustomer(authUserId) {
   try {
     const { data, error } = await supabase
@@ -155,9 +149,6 @@ async function fetchCustomer(authUserId) {
   }
 }
 
-/**
- * Fetch customer by customer ID
- */
 async function fetchCustomerById(customerId) {
   try {
     const { data, error } = await supabase
@@ -178,9 +169,6 @@ async function fetchCustomerById(customerId) {
   }
 }
 
-/**
- * Update session context for customer
- */
 async function updateCustomerChannel(customerId, channel, sessionContext = {}) {
   try {
     const { error } = await supabase
@@ -204,9 +192,6 @@ async function updateCustomerChannel(customerId, channel, sessionContext = {}) {
   }
 }
 
-/**
- * Save session history
- */
 async function updateSession(customerId, channel, intent, context = {}) {
   try {
     const sessionId = `SESS-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -235,9 +220,6 @@ async function updateSession(customerId, channel, intent, context = {}) {
   }
 }
 
-/**
- * Get recent sessions for context
- */
 async function getRecentSessions(customerId, limit = 5) {
   try {
     const { data, error } = await supabase
@@ -260,37 +242,41 @@ async function getRecentSessions(customerId, limit = 5) {
 }
 
 /**
- * Search products by category or occasion
+ * Search products by category or occasion - FIXED ATTRIBUTES QUERY
  */
 async function searchProducts(category = null, occasion = null) {
   try {
+    console.log("🔍 Searching products:", { category, occasion });
+    
     let query = supabase.from("products").select("*");
 
     if (category) {
+      console.log("Filtering by category:", category);
       query = query.eq("category", category);
     }
 
     if (occasion) {
-      query = query.contains("attributes", { occasion: [occasion] });
+      console.log("Filtering by occasion:", occasion);
+      // Try different ways to query JSONB
+      // Method 1: Using contains with proper format
+      query = query.or(`attributes.occasion.cs.{"${occasion}"},attributes->>occasion.like.%${occasion}%`);
     }
 
     const { data, error } = await query;
     
     if (error) {
-      console.error("Product search error:", error.message);
+      console.error("❌ Product search error:", error.message);
       return [];
     }
 
+    console.log(`✅ Found ${data?.length || 0} products`);
     return data || [];
   } catch (err) {
-    console.error("Product search exception:", err);
+    console.error("❌ Product search exception:", err);
     return [];
   }
 }
 
-/**
- * Check inventory for SKUs
- */
 async function checkInventory(skuList, customerStoreLocation = "Mumbai") {
   try {
     const { data, error } = await supabase
@@ -303,7 +289,6 @@ async function checkInventory(skuList, customerStoreLocation = "Mumbai") {
       return [];
     }
 
-    // Group by SKU
     const inventoryMap = {};
     
     (data || []).forEach(inv => {
@@ -324,7 +309,6 @@ async function checkInventory(skuList, customerStoreLocation = "Mumbai") {
       }
     });
 
-    // Determine fulfillment options
     Object.values(inventoryMap).forEach(item => {
       if (item.onlineStock > 0) {
         item.fulfillmentOptions.push("ship_to_home");
@@ -344,9 +328,6 @@ async function checkInventory(skuList, customerStoreLocation = "Mumbai") {
   }
 }
 
-/**
- * Create order
- */
 async function createOrder(customer, skuList, fulfillmentMode, amount) {
   try {
     const orderId = "ORD-" + Date.now() + "-" + Math.random().toString(36).substr(2, 6);
@@ -379,9 +360,6 @@ async function createOrder(customer, skuList, fulfillmentMode, amount) {
   }
 }
 
-/**
- * Log payment transaction
- */
 async function logPayment(orderId, customerId, amount, status, message, method = "upi") {
   try {
     const txnId = "TXN-" + Date.now() + "-" + Math.random().toString(36).substr(2, 6);
@@ -411,12 +389,8 @@ async function logPayment(orderId, customerId, amount, status, message, method =
   }
 }
 
-/**
- * Update customer spend
- */
 async function updateCustomerSpend(customerId, increment) {
   try {
-    // First get current spend
     const { data: customer } = await supabase
       .from("customers")
       .select("total_spend")
@@ -447,344 +421,22 @@ async function updateCustomerSpend(customerId, increment) {
 }
 
 // ============================================================================
-// ORCHESTRATOR LOGIC
+// WORKER AGENTS (DEFINED AFTER HELPER FUNCTIONS!)
 // ============================================================================
 
 /**
- * Classify user intent using LLM or fallback
+ * Recommendation Agent - FIXED: Now has access to searchProducts
  */
-async function classifyIntent(userQuery, customer, recentSessions) {
-  // Default intent structure
-  const defaultIntent = {
-    intent: "recommend",
-    target_skus: [],
-    occasion: null,
-    payment_method: null,
-    fulfillment_mode: null
-  };
-
-  // If no OpenAI, use keyword-based classification
-  if (!openai) {
-    const lowerQuery = userQuery.toLowerCase();
-    
-    if (lowerQuery.includes("stock") || lowerQuery.includes("available") || lowerQuery.includes("inventory")) {
-      return { ...defaultIntent, intent: "check_inventory" };
-    }
-    
-    if (lowerQuery.includes("buy") || lowerQuery.includes("purchase") || lowerQuery.includes("checkout") || lowerQuery.includes("pay")) {
-      return { ...defaultIntent, intent: "checkout" };
-    }
-    
-    if (lowerQuery.includes("order") || lowerQuery.includes("status") || lowerQuery.includes("track") || lowerQuery.includes("return")) {
-      return { ...defaultIntent, intent: "post_purchase" };
-    }
-    
-    if (lowerQuery.includes("hi") || lowerQuery.includes("hello") || lowerQuery.includes("hey")) {
-      return { ...defaultIntent, intent: "smalltalk" };
-    }
-    
-    return defaultIntent;
-  }
-
-  // Use OpenAI for intent classification
-  try {
-    const systemPrompt = `You are the Sales Orchestrator for an omnichannel fashion retailer.
-Classify the user's intent from their message.
-
-Possible intents:
-- "recommend": asking for suggestions, styles, outfits, what to buy
-- "check_inventory": asking about stock, availability, in-store pickup
-- "checkout": ready to buy, pay, place order, reserve
-- "post_purchase": order status, returns, exchanges, tracking
-- "smalltalk": greetings, thank you, chit-chat
-
-Return valid JSON in this exact format:
-{
-  "intent": "recommend",
-  "target_skus": [],
-  "occasion": null,
-  "payment_method": null,
-  "fulfillment_mode": null
-}`;
-
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: systemPrompt },
-        {
-          role: "user",
-          content: `User message: "${userQuery}"
-Customer tier: ${customer?.loyalty_tier || "unknown"}
-Last channel: ${customer?.last_seen_channel || "unknown"}`
-        }
-      ],
-      response_format: { type: "json_object" },
-      temperature: 0.1,
-      max_tokens: 200
-    });
-
-    const jsonText = response.choices[0].message.content;
-    const parsed = JSON.parse(jsonText);
-    
-    // Validate intent
-    const validIntents = ["recommend", "check_inventory", "checkout", "post_purchase", "smalltalk"];
-    if (!validIntents.includes(parsed.intent)) {
-      parsed.intent = "recommend";
-    }
-    
-    return parsed;
-  } catch (err) {
-    console.error("Intent classification failed:", err.message);
-    return defaultIntent;
-  }
-}
-
-/**
- * Main orchestrator function
- */
-async function runRetailOrchestrator(user_query, customer_id, channel = "web") {
-  try {
-    // 1. Fetch customer
-    const customer = await fetchCustomerById(customer_id);
-    
-    if (!customer) {
-      return {
-        reply: "I couldn't find your customer profile. Please contact support.",
-        structured: { error: "Customer not found", plan: { intent: "error" } }
-      };
-    }
-
-    // 2. Get session context
-    const recentSessions = await getRecentSessions(customer_id, 3);
-    const previousContext = customer.session_context || {};
-    const lastChannel = customer.last_seen_channel;
-    const channelSwitched = lastChannel && lastChannel !== channel;
-    
-    // Initialize session context
-    let sessionContext = {
-      cart: previousContext.cart || [],
-      lastRecommended: previousContext.lastRecommended || null,
-      lastBrowsedCategory: previousContext.lastBrowsedCategory || null,
-      channel_switched: channelSwitched,
-      previous_channel: lastChannel || null,
-      current_channel: channel,
-      persona_traits: previousContext.persona_traits || {}
-    };
-
-    // 3. Classify intent
-    const plan = await classifyIntent(user_query, customer, recentSessions);
-    
-    let workerResult = {};
-    let cart = sessionContext.cart || [];
-
-    // 4. Route to worker agents based on intent
-    switch (plan.intent) {
-      case "recommend":
-        const recs = await recommendationAgent(customer, user_query);
-        workerResult.recommendations = recs;
-        
-        if (recs && recs.length > 0) {
-          sessionContext.lastRecommended = {
-            sku: recs[0].sku,
-            name: recs[0].name,
-            category: recs[0].category,
-            price: recs[0].price
-          };
-          sessionContext.lastBrowsedCategory = recs[0].category;
-        }
-        break;
-
-      case "check_inventory":
-        const skuList = plan.target_skus.length > 0 
-          ? plan.target_skus 
-          : cart.map(i => i.sku);
-        
-        if (skuList.length > 0) {
-          workerResult.inventory = await checkInventory(skuList, customer.store_location);
-        } else {
-          workerResult.inventory = [];
-        }
-        break;
-
-      case "checkout":
-        if (cart.length === 0) {
-          workerResult.checkout = { error: "Cart is empty" };
-        } else {
-          const cartTotal = cart.reduce((sum, item) => sum + (item.price || 0) * (item.qty || 1), 0);
-          
-          const loyalty = loyaltyAgent(customer, cartTotal, null);
-          workerResult.loyalty = loyalty;
-
-          const payment = await paymentAgent({
-            customerId: customer.id,
-            amount: loyalty.finalAmount,
-            method: plan.payment_method || "upi"
-          });
-          
-          workerResult.payment = payment;
-
-          if (payment.status === "success") {
-            const skuList = cart.map(i => i.sku);
-            const orderId = await createOrder(
-              customer,
-              skuList,
-              plan.fulfillment_mode || "reserve_in_store",
-              loyalty.finalAmount
-            );
-
-            if (orderId) {
-              await logPayment(
-                orderId,
-                customer.id,
-                loyalty.finalAmount,
-                payment.status,
-                payment.message,
-                plan.payment_method || "upi"
-              );
-
-              await updateCustomerSpend(customer.id, loyalty.finalAmount);
-
-              const fulfillment = fulfillmentAgent({
-                orderId,
-                mode: plan.fulfillment_mode || "reserve_in_store",
-                storeLocation: customer.store_location,
-                slot: "6pm-8pm"
-              });
-              
-              workerResult.fulfillment = fulfillment;
-              cart = []; // Clear cart
-              sessionContext.cart = cart;
-              sessionContext.lastRecommended = null;
-            }
-          }
-        }
-        break;
-
-      case "post_purchase":
-        const { data: recentOrders } = await supabase
-          .from("orders")
-          .select("*")
-          .eq("customer_id", customer.id)
-          .order("created_at", { ascending: false })
-          .limit(1);
-
-        workerResult.post_purchase = {
-          message: recentOrders && recentOrders.length > 0
-            ? `Your last order (${recentOrders[0].order_id}) is ${recentOrders[0].status}. It should arrive in 2–3 days.`
-            : "I couldn't find any recent orders for your account."
-        };
-        break;
-
-      case "smalltalk":
-        workerResult.smalltalk = {
-          greeting: true,
-          message: `Hello ${customer.name || "there"}! How can I help you today?`
-        };
-        break;
-    }
-
-    // 5. Save session
-    await updateSession(customer.id, channel, plan.intent, {
-      last_user_message: user_query,
-      cart,
-      plan,
-      channel_switched: channelSwitched
-    });
-
-    // 6. Generate natural language response
-    let replyText;
-    
-    if (!openai) {
-      // Fallback response without AI
-      switch (plan.intent) {
-        case "recommend":
-          if (workerResult.recommendations?.length > 0) {
-            const item = workerResult.recommendations[0];
-            replyText = `I found ${workerResult.recommendations.length} items. Here's one: ${item.name} for ₹${item.price}`;
-          } else {
-            replyText = "I couldn't find specific recommendations. Could you describe what you're looking for?";
-          }
-          break;
-        case "checkout":
-          if (cart.length === 0) {
-            replyText = "Your cart is empty. Add some items first!";
-          } else if (workerResult.payment?.status === "success") {
-            replyText = `Payment successful! Order placed. ${workerResult.fulfillment?.message || "Thank you for your purchase!"}`;
-          } else {
-            replyText = "Ready to checkout! Your cart total is ₹" + 
-              cart.reduce((sum, item) => sum + (item.price || 0) * (item.qty || 1), 0);
-          }
-          break;
-        default:
-          replyText = `I understand you're asking about ${plan.intent}. How can I assist you further?`;
-      }
-    } else {
-      // Generate AI response
-      const channelAwareness = channelSwitched 
-        ? `Note: Customer switched from ${lastChannel} to ${channel}. Acknowledge naturally if relevant.`
-        : "";
-
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are a friendly retail assistant. Be helpful, concise, and personal.
-${channelAwareness}
-Customer name: ${customer.name || "Customer"}
-Loyalty tier: ${customer.loyalty_tier || "bronze"}`
-          },
-          {
-            role: "user",
-            content: `User: "${user_query}"
-Intent: ${plan.intent}
-Context: ${JSON.stringify(workerResult, null, 2)}`
-          }
-        ],
-        temperature: 0.7,
-        max_tokens: 300
-      });
-
-      replyText = response.choices[0].message.content;
-    }
-
-    // 7. Update customer context
-    sessionContext.cart = cart;
-    await updateCustomerChannel(customer.id, channel, sessionContext);
-
-    return {
-      reply: replyText,
-      structured: {
-        plan,
-        workerResult,
-        customer: {
-          id: customer.id,
-          name: customer.name,
-          loyalty_tier: customer.loyalty_tier
-        },
-        sessionContext,
-        channelSwitched
-      }
-    };
-
-  } catch (err) {
-    console.error("Orchestrator error:", err);
-    return {
-      reply: "I apologize, but I'm having trouble processing your request. Please try again or contact support.",
-      structured: { error: err.message, plan: { intent: "error" } }
-    };
-  }
-}
-
-// ============================================================================
-// WORKER AGENTS
-// ============================================================================
-
 async function recommendationAgent(customer, userQuery) {
   try {
+    console.log("🤖 Recommendation Agent called for:", userQuery);
+    console.log("Customer location:", customer?.store_location);
+    
     const lowerQ = userQuery.toLowerCase();
     let category = null;
+    let occasion = null;
 
+    // Category detection
     if (lowerQ.includes("shirt") || lowerQ.includes("top")) category = "shirts";
     else if (lowerQ.includes("pant") || lowerQ.includes("trouser")) category = "pants";
     else if (lowerQ.includes("shoe") || lowerQ.includes("sneaker") || lowerQ.includes("footwear")) category = "footwear";
@@ -792,10 +444,36 @@ async function recommendationAgent(customer, userQuery) {
     else if (lowerQ.includes("jean")) category = "jeans";
     else if (lowerQ.includes("jacket") || lowerQ.includes("coat")) category = "outerwear";
 
-    const products = await searchProducts(category);
-    return products.slice(0, 5);
+    // Occasion detection
+    if (lowerQ.includes("party") || lowerQ.includes("night")) occasion = "party";
+    else if (lowerQ.includes("work") || lowerQ.includes("office")) occasion = "formal";
+    else if (lowerQ.includes("casual") || lowerQ.includes("everyday")) occasion = "casual";
+    else if (lowerQ.includes("wedding") || lowerQ.includes("festive")) occasion = "festive";
+
+    console.log("Detected category:", category, "occasion:", occasion);
+
+    const products = await searchProducts(category, occasion);
+    
+    // Personalize by store location (inventory availability)
+    const personalizedProducts = [];
+    
+    for (const product of products.slice(0, 10)) {
+      const inventory = await checkInventory([product.sku], customer?.store_location);
+      if (inventory.length > 0) {
+        const available = inventory[0];
+        product.availability = available;
+        product.inStock = available.onlineStock > 0 || available.storeStock > 0;
+        personalizedProducts.push(product);
+      }
+    }
+
+    // If no personalized results, return all products
+    const finalProducts = personalizedProducts.length > 0 ? personalizedProducts : products.slice(0, 5);
+    
+    console.log(`✅ Returning ${finalProducts.length} recommendations`);
+    return finalProducts;
   } catch (err) {
-    console.error("Recommendation agent error:", err);
+    console.error("❌ Recommendation agent error:", err);
     return [];
   }
 }
@@ -834,8 +512,7 @@ function loyaltyAgent(customer, cartTotal, couponCode) {
 
 async function paymentAgent({ customerId, amount, method = "upi" }) {
   try {
-    // Simulate payment processing
-    const fail = Math.random() < 0.1; // 10% failure rate
+    const fail = Math.random() < 0.1;
     
     if (fail) {
       return {
@@ -865,7 +542,7 @@ async function paymentAgent({ customerId, amount, method = "upi" }) {
 
 function fulfillmentAgent({ orderId, mode = "reserve_in_store", storeLocation = "Mumbai", slot = "6pm-8pm" }) {
   try {
-    const fail = Math.random() < 0.05; // 5% failure rate
+    const fail = Math.random() < 0.05;
     
     if (fail) {
       return {
@@ -904,11 +581,378 @@ function fulfillmentAgent({ orderId, mode = "reserve_in_store", storeLocation = 
 }
 
 // ============================================================================
+// ORCHESTRATOR LOGIC
+// ============================================================================
+
+/**
+ * Classify user intent - FIXED: Using gpt-4o (not gpt-4o-mini)
+ */
+async function classifyIntent(userQuery, customer, recentSessions) {
+  const defaultIntent = {
+    intent: "recommend",
+    target_skus: [],
+    occasion: null,
+    payment_method: null,
+    fulfillment_mode: null
+  };
+
+  if (!openai) {
+    const lowerQuery = userQuery.toLowerCase();
+    
+    if (lowerQuery.includes("stock") || lowerQuery.includes("available") || lowerQuery.includes("inventory")) {
+      return { ...defaultIntent, intent: "check_inventory" };
+    }
+    
+    if (lowerQuery.includes("buy") || lowerQuery.includes("purchase") || lowerQuery.includes("checkout") || lowerQuery.includes("pay")) {
+      return { ...defaultIntent, intent: "checkout" };
+    }
+    
+    if (lowerQuery.includes("order") || lowerQuery.includes("status") || lowerQuery.includes("track") || lowerQuery.includes("return")) {
+      return { ...defaultIntent, intent: "post_purchase" };
+    }
+    
+    if (lowerQuery.includes("hi") || lowerQuery.includes("hello") || lowerQuery.includes("hey")) {
+      return { ...defaultIntent, intent: "smalltalk" };
+    }
+    
+    return defaultIntent;
+  }
+
+  try {
+    const systemPrompt = `You are the Sales Orchestrator for an omnichannel fashion retailer.
+Classify the user's intent from their message.
+
+Possible intents:
+- "recommend": asking for suggestions, styles, outfits, what to buy
+- "check_inventory": asking about stock, availability, in-store pickup
+- "checkout": ready to buy, pay, place order, reserve
+- "post_purchase": order status, returns, exchanges, tracking
+- "smalltalk": greetings, thank you, chit-chat
+
+Return valid JSON in this exact format:
+{
+  "intent": "recommend",
+  "target_skus": [],
+  "occasion": null,
+  "payment_method": null,
+  "fulfillment_mode": null
+}`;
+
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o", // FIXED: Changed from gpt-4o-mini to gpt-4o
+      messages: [
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: `User message: "${userQuery}"
+Customer tier: ${customer?.loyalty_tier || "unknown"}
+Last channel: ${customer?.last_seen_channel || "unknown"}`
+        }
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.1,
+      max_tokens: 200
+    });
+
+    const jsonText = response.choices[0].message.content;
+    const parsed = JSON.parse(jsonText);
+    
+    const validIntents = ["recommend", "check_inventory", "checkout", "post_purchase", "smalltalk"];
+    if (!validIntents.includes(parsed.intent)) {
+      parsed.intent = "recommend";
+    }
+    
+    return parsed;
+  } catch (err) {
+    console.error("❌ OpenAI Intent classification failed:", err.response?.data || err.message);
+    console.error("Full error:", err);
+    return defaultIntent;
+  }
+}
+
+/**
+ * Main orchestrator function
+ */
+async function runRetailOrchestrator(user_query, customer_id, channel = "web") {
+  try {
+    console.log("\n" + "=".repeat(60));
+    console.log("🚀 RUNNING ORCHESTRATOR");
+    console.log("Query:", user_query);
+    console.log("Customer ID:", customer_id);
+    console.log("Channel:", channel);
+    
+    const customer = await fetchCustomerById(customer_id);
+    
+    if (!customer) {
+      console.error("❌ Customer not found");
+      return {
+        reply: "I couldn't find your customer profile. Please contact support.",
+        structured: { error: "Customer not found", plan: { intent: "error" } }
+      };
+    }
+
+    console.log("Customer found:", customer.name);
+    
+    const recentSessions = await getRecentSessions(customer_id, 3);
+    const previousContext = customer.session_context || {};
+    const lastChannel = customer.last_seen_channel;
+    const channelSwitched = lastChannel && lastChannel !== channel;
+    
+    let sessionContext = {
+      cart: previousContext.cart || [],
+      lastRecommended: previousContext.lastRecommended || null,
+      lastBrowsedCategory: previousContext.lastBrowsedCategory || null,
+      channel_switched: channelSwitched,
+      previous_channel: lastChannel || null,
+      current_channel: channel,
+      persona_traits: previousContext.persona_traits || {}
+    };
+
+    console.log("📋 Session Context:", JSON.stringify(sessionContext, null, 2));
+    
+    const plan = await classifyIntent(user_query, customer, recentSessions);
+    console.log("🎯 Intent Plan:", JSON.stringify(plan, null, 2));
+    
+    let workerResult = {};
+    let cart = sessionContext.cart || [];
+
+    // Process based on intent
+    console.log("🔄 Processing intent:", plan.intent);
+    
+    switch (plan.intent) {
+      case "recommend":
+        const recs = await recommendationAgent(customer, user_query);
+        workerResult.recommendations = recs;
+        console.log(`✅ Recommendations found: ${recs?.length || 0}`);
+        
+        if (recs && recs.length > 0) {
+          sessionContext.lastRecommended = {
+            sku: recs[0].sku,
+            name: recs[0].name,
+            category: recs[0].category,
+            price: recs[0].price
+          };
+          sessionContext.lastBrowsedCategory = recs[0].category;
+        }
+        break;
+
+      case "check_inventory":
+        const skuList = plan.target_skus.length > 0 
+          ? plan.target_skus 
+          : cart.map(i => i.sku);
+        
+        console.log("Checking inventory for SKUs:", skuList);
+        
+        if (skuList.length > 0) {
+          workerResult.inventory = await checkInventory(skuList, customer.store_location);
+          console.log(`✅ Inventory results: ${workerResult.inventory?.length || 0}`);
+        } else {
+          workerResult.inventory = [];
+          console.log("⚠️ No SKUs to check inventory for");
+        }
+        break;
+
+      case "checkout":
+        if (cart.length === 0) {
+          workerResult.checkout = { error: "Cart is empty" };
+          console.log("⚠️ Checkout attempted with empty cart");
+        } else {
+          const cartTotal = cart.reduce((sum, item) => sum + (item.price || 0) * (item.qty || 1), 0);
+          console.log("💰 Cart total:", cartTotal);
+          
+          const loyalty = loyaltyAgent(customer, cartTotal, null);
+          workerResult.loyalty = loyalty;
+          console.log("🎫 Loyalty applied:", loyalty);
+
+          const payment = await paymentAgent({
+            customerId: customer.id,
+            amount: loyalty.finalAmount,
+            method: plan.payment_method || "upi"
+          });
+          
+          workerResult.payment = payment;
+          console.log("💳 Payment result:", payment.status);
+
+          if (payment.status === "success") {
+            const skuList = cart.map(i => i.sku);
+            const orderId = await createOrder(
+              customer,
+              skuList,
+              plan.fulfillment_mode || "reserve_in_store",
+              loyalty.finalAmount
+            );
+
+            if (orderId) {
+              console.log("📦 Order created:", orderId);
+              
+              await logPayment(
+                orderId,
+                customer.id,
+                loyalty.finalAmount,
+                payment.status,
+                payment.message,
+                plan.payment_method || "upi"
+              );
+
+              await updateCustomerSpend(customer.id, loyalty.finalAmount);
+
+              const fulfillment = fulfillmentAgent({
+                orderId,
+                mode: plan.fulfillment_mode || "reserve_in_store",
+                storeLocation: customer.store_location,
+                slot: "6pm-8pm"
+              });
+              
+              workerResult.fulfillment = fulfillment;
+              console.log("🚚 Fulfillment:", fulfillment.status);
+              
+              cart = [];
+              sessionContext.cart = cart;
+              sessionContext.lastRecommended = null;
+            }
+          }
+        }
+        break;
+
+      case "post_purchase":
+        const { data: recentOrders } = await supabase
+          .from("orders")
+          .select("*")
+          .eq("customer_id", customer.id)
+          .order("created_at", { ascending: false })
+          .limit(1);
+
+        workerResult.post_purchase = {
+          message: recentOrders && recentOrders.length > 0
+            ? `Your last order (${recentOrders[0].order_id}) is ${recentOrders[0].status}. It should arrive in 2–3 days.`
+            : "I couldn't find any recent orders for your account."
+        };
+        console.log("📦 Post-purchase:", workerResult.post_purchase.message);
+        break;
+
+      case "smalltalk":
+        workerResult.smalltalk = {
+          greeting: true,
+          message: `Hello ${customer.name || "there"}! How can I help you today?`
+        };
+        console.log("👋 Smalltalk response generated");
+        break;
+    }
+
+    console.log("📊 Worker Result Summary:", Object.keys(workerResult));
+    
+    await updateSession(customer.id, channel, plan.intent, {
+      last_user_message: user_query,
+      cart,
+      plan,
+      channel_switched: channelSwitched
+    });
+
+    // Generate response
+    let replyText;
+    
+    if (!openai) {
+      console.log("🤖 Using fallback response (no OpenAI)");
+      switch (plan.intent) {
+        case "recommend":
+          if (workerResult.recommendations?.length > 0) {
+            const item = workerResult.recommendations[0];
+            replyText = `I found ${workerResult.recommendations.length} items. Here's one: ${item.name} for ₹${item.price}`;
+          } else {
+            replyText = "I couldn't find specific recommendations. Could you describe what you're looking for?";
+          }
+          break;
+        case "checkout":
+          if (cart.length === 0) {
+            replyText = "Your cart is empty. Add some items first!";
+          } else if (workerResult.payment?.status === "success") {
+            replyText = `Payment successful! Order placed. ${workerResult.fulfillment?.message || "Thank you for your purchase!"}`;
+          } else {
+            replyText = "Ready to checkout! Your cart total is ₹" + 
+              cart.reduce((sum, item) => sum + (item.price || 0) * (item.qty || 1), 0);
+          }
+          break;
+        default:
+          replyText = `I understand you're asking about ${plan.intent}. How can I assist you further?`;
+      }
+    } else {
+      console.log("🤖 Generating AI response with OpenAI");
+      const channelAwareness = channelSwitched 
+        ? `Note: Customer switched from ${lastChannel} to ${channel}. Acknowledge naturally if relevant.`
+        : "";
+
+      try {
+        const response = await openai.chat.completions.create({
+          model: "gpt-4o", // FIXED: Changed from gpt-4o-mini to gpt-4o
+          messages: [
+            {
+              role: "system",
+              content: `You are a friendly retail assistant for a fashion store. Be helpful, concise, and personal.
+${channelAwareness}
+Customer name: ${customer.name || "Customer"}
+Loyalty tier: ${customer.loyalty_tier || "bronze"}
+
+Use this context to inform your response:
+- Plan: ${JSON.stringify(plan)}
+- Worker Results: ${JSON.stringify(workerResult, null, 2)}
+- Cart: ${JSON.stringify(cart)}
+
+Keep responses under 3 sentences. Be enthusiastic and helpful.`
+            },
+            {
+              role: "user",
+              content: `Customer says: "${user_query}"`
+            }
+          ],
+          temperature: 0.7,
+          max_tokens: 300
+        });
+
+        replyText = response.choices[0].message.content;
+        console.log("✅ AI Response generated:", replyText.substring(0, 100) + "...");
+      } catch (openaiErr) {
+        console.error("❌ OpenAI response generation failed:", openaiErr.response?.data || openaiErr.message);
+        replyText = `I understand you're asking about ${user_query}. Based on your request, I found ${workerResult.recommendations?.length || 0} recommendations. How can I help you further?`;
+      }
+    }
+
+    sessionContext.cart = cart;
+    await updateCustomerChannel(customer.id, channel, sessionContext);
+
+    console.log("✅ Orchestrator completed successfully");
+    console.log("=".repeat(60) + "\n");
+
+    return {
+      reply: replyText,
+      structured: {
+        plan,
+        workerResult,
+        customer: {
+          id: customer.id,
+          name: customer.name,
+          loyalty_tier: customer.loyalty_tier
+        },
+        sessionContext,
+        channelSwitched
+      }
+    };
+
+  } catch (err) {
+    console.error("❌ Orchestrator error:", err);
+    console.error("Stack trace:", err.stack);
+    return {
+      reply: "I apologize, but I'm having trouble processing your request. Please try again or contact support.",
+      structured: { error: err.message, plan: { intent: "error" } }
+    };
+  }
+}
+
+// ============================================================================
 // API ENDPOINTS
 // ============================================================================
 
 /**
- * GET /api/me - Get current user profile
+ * GET /api/me - FIXED: Returns session_context
  */
 app.get("/api/me", verifyUser, async (req, res) => {
   try {
@@ -923,6 +967,7 @@ app.get("/api/me", verifyUser, async (req, res) => {
       });
     }
 
+    // FIXED: Now includes session_context
     res.json({
       id: customer.id,
       name: customer.name,
@@ -930,7 +975,8 @@ app.get("/api/me", verifyUser, async (req, res) => {
       loyalty_tier: customer.loyalty_tier,
       store_location: customer.store_location,
       total_spend: customer.total_spend,
-      last_seen_channel: customer.last_seen_channel
+      last_seen_channel: customer.last_seen_channel,
+      session_context: customer.session_context || {} // FIXED: Added this
     });
     
   } catch (err) {
@@ -942,9 +988,6 @@ app.get("/api/me", verifyUser, async (req, res) => {
   }
 });
 
-/**
- * GET /api/customers/:id - Get customer by ID (admin/testing)
- */
 app.get("/api/customers/:id", async (req, res) => {
   try {
     const customer = await fetchCustomerById(req.params.id);
@@ -960,9 +1003,6 @@ app.get("/api/customers/:id", async (req, res) => {
   }
 });
 
-/**
- * GET /api/products - Search products
- */
 app.get("/api/products", async (req, res) => {
   try {
     const { category, occasion, limit = 20 } = req.query;
@@ -993,9 +1033,6 @@ app.get("/api/products", async (req, res) => {
   }
 });
 
-/**
- * GET /api/products/:sku - Get product by SKU
- */
 app.get("/api/products/:sku", async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -1015,9 +1052,6 @@ app.get("/api/products/:sku", async (req, res) => {
   }
 });
 
-/**
- * GET /api/inventory/:sku - Check inventory
- */
 app.get("/api/inventory/:sku", async (req, res) => {
   try {
     const { location } = req.query;
@@ -1044,9 +1078,6 @@ app.get("/api/inventory/:sku", async (req, res) => {
   }
 });
 
-/**
- * POST /api/cart - Add item to cart
- */
 app.post("/api/cart", verifyUser, async (req, res) => {
   try {
     const authUserId = req.authUser.id;
@@ -1059,7 +1090,6 @@ app.post("/api/cart", verifyUser, async (req, res) => {
       });
     }
 
-    // Get customer
     const customer = await fetchCustomer(authUserId);
     
     if (!customer) {
@@ -1069,17 +1099,14 @@ app.post("/api/cart", verifyUser, async (req, res) => {
       });
     }
 
-    // Load or initialize session context
     const sessionContext = customer.session_context || {};
     let cart = sessionContext.cart || [];
 
-    // Add or update item in cart
     const existingItemIndex = cart.findIndex(item => item.sku === sku);
     
     if (existingItemIndex >= 0) {
       cart[existingItemIndex].qty += qty;
     } else {
-      // Get product name for better UX
       const { data: product } = await supabase
         .from("products")
         .select("name")
@@ -1095,14 +1122,12 @@ app.post("/api/cart", verifyUser, async (req, res) => {
       });
     }
 
-    // Update session context
     const updatedContext = {
       ...sessionContext,
       cart,
       last_updated: new Date().toISOString()
     };
 
-    // Save to database
     await updateCustomerChannel(customer.id, channel, updatedContext);
 
     const cartTotal = cart.reduce((sum, item) => sum + (item.price || 0) * (item.qty || 1), 0);
@@ -1124,9 +1149,6 @@ app.post("/api/cart", verifyUser, async (req, res) => {
   }
 });
 
-/**
- * GET /api/cart - Get cart contents
- */
 app.get("/api/cart", verifyUser, async (req, res) => {
   try {
     const authUserId = req.authUser.id;
@@ -1152,9 +1174,6 @@ app.get("/api/cart", verifyUser, async (req, res) => {
   }
 });
 
-/**
- * DELETE /api/cart/:sku - Remove item from cart
- */
 app.delete("/api/cart/:sku", verifyUser, async (req, res) => {
   try {
     const authUserId = req.authUser.id;
@@ -1169,10 +1188,8 @@ app.delete("/api/cart/:sku", verifyUser, async (req, res) => {
     const sessionContext = customer.session_context || {};
     let cart = sessionContext.cart || [];
 
-    // Remove item
     cart = cart.filter(item => item.sku !== sku);
 
-    // Update session context
     const updatedContext = {
       ...sessionContext,
       cart,
@@ -1198,49 +1215,47 @@ app.delete("/api/cart/:sku", verifyUser, async (req, res) => {
  */
 app.post("/api/retail-orchestrator", verifyUser, async (req, res) => {
   try {
-    console.log("🔵 Orchestrator called:", {
-      user: req.authUser?.email,
-      body: req.body
-    });
+    console.log("\n" + "🔥".repeat(20) + " NEW CHAT REQUEST " + "🔥".repeat(20));
+    console.log("User:", req.authUser?.email);
+    console.log("Body:", JSON.stringify(req.body, null, 2));
 
     const { user_query, channel = "web" } = req.body;
 
-    if (!user_query || typeof user_query !== 'string') {
+    if (!user_query || typeof user_query !== 'string' || user_query.trim().length === 0) {
+      console.error("❌ Invalid user_query");
       return res.status(400).json({
         reply: "Please provide a message to process.",
         structured: { error: "Missing or invalid user_query" }
       });
     }
 
-    // Get customer
     const authUserId = req.authUser.id;
     const customer = await fetchCustomer(authUserId);
     
     if (!customer) {
+      console.error("❌ Customer not found for auth user:", authUserId);
       return res.status(404).json({
         reply: "I couldn't find your profile. Please complete your setup first.",
         structured: { error: "Customer not found" }
       });
     }
 
-    console.log("🟡 Processing for customer:", customer.id, customer.name);
+    console.log("✅ Customer found:", customer.name, "ID:", customer.id);
 
-    // Run orchestrator
     const result = await runRetailOrchestrator(
       user_query.trim(),
       customer.id,
       channel
     );
 
-    console.log("🟢 Orchestrator result:", {
-      reply_length: result.reply?.length,
-      intent: result.structured?.plan?.intent
-    });
+    console.log("✅ Orchestrator completed, sending response");
+    console.log("🔥".repeat(60) + "\n");
 
     res.json(result);
     
   } catch (err) {
-    console.error("❌ POST /api/retail-orchestrator error:", err);
+    console.error("❌ POST /api/retail-orchestrator FATAL ERROR:", err);
+    console.error("Stack trace:", err.stack);
     
     res.status(500).json({
       reply: "I apologize, but I'm experiencing technical difficulties. Please try again in a moment.",
@@ -1252,25 +1267,20 @@ app.post("/api/retail-orchestrator", verifyUser, async (req, res) => {
   }
 });
 
-/**
- * GET /api/health - Health check endpoint
- */
 app.get("/api/health", async (req, res) => {
   try {
-    // Check database connection
     const { error: dbError } = await supabase
       .from('customers')
       .select('count')
       .limit(1);
 
-    // Check OpenAI if configured
     let openaiStatus = "not_configured";
     if (openai) {
       try {
         await openai.models.list();
         openaiStatus = "connected";
       } catch (err) {
-        openaiStatus = "error";
+        openaiStatus = "error: " + (err.response?.data?.error?.message || err.message);
       }
     }
 
@@ -1278,7 +1288,7 @@ app.get("/api/health", async (req, res) => {
       status: "healthy",
       timestamp: new Date().toISOString(),
       services: {
-        database: dbError ? "error" : "connected",
+        database: dbError ? "error: " + dbError.message : "connected",
         openai: openaiStatus,
         express: "running"
       },
@@ -1292,9 +1302,6 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-/**
- * GET / - Root endpoint
- */
 app.get("/", (req, res) => {
   res.json({
     name: "Retail Orchestrator API",
@@ -1311,11 +1318,7 @@ app.get("/", (req, res) => {
   });
 });
 
-// ============================================================================
-// ERROR HANDLING MIDDLEWARE
-// ============================================================================
-
-// 404 handler
+// Error handling
 app.use((req, res) => {
   res.status(404).json({
     error: "Endpoint not found",
@@ -1324,7 +1327,6 @@ app.use((req, res) => {
   });
 });
 
-// Global error handler
 app.use((err, req, res, next) => {
   console.error("🚨 Global error handler:", err);
   
@@ -1335,10 +1337,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-// ============================================================================
-// SERVER START
-// ============================================================================
-
+// Server start
 const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST || '0.0.0.0';
 
@@ -1363,7 +1362,6 @@ app.listen(PORT, HOST, async () => {
 
   // Test connections
   try {
-    // Test Supabase
     const { data, error } = await supabase
       .from('customers')
       .select('count')
@@ -1375,13 +1373,12 @@ app.listen(PORT, HOST, async () => {
       console.log('✅ Supabase connection successful');
     }
 
-    // Test OpenAI if configured
     if (openai) {
       try {
         await openai.models.list();
         console.log('✅ OpenAI connection successful');
       } catch (err) {
-        console.warn('⚠️  OpenAI connection failed:', err.message);
+        console.warn('⚠️  OpenAI connection failed:', err.response?.data?.error?.message || err.message);
       }
     }
   } catch (err) {
@@ -1389,7 +1386,6 @@ app.listen(PORT, HOST, async () => {
   }
 });
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('SIGTERM received. Shutting down gracefully...');
   process.exit(0);

@@ -1305,6 +1305,8 @@ router.get("/health", async (req, res) => {
   }
 });
 
+app.use("/api", router);
+
 app.get("/", (req, res) => {
   res.json({
     name: "Retail Orchestrator API",
@@ -1321,7 +1323,7 @@ app.get("/", (req, res) => {
   });
 });
 
-app.use("/api", router);
+
 
 
 // Error handling

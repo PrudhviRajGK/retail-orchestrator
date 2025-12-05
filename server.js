@@ -5,6 +5,7 @@ const cors = require("cors");
 const bodyParser = require("body-parser");
 const { createClient } = require('@supabase/supabase-js');
 const OpenAI = require("openai");
+const MessagingResponse = require("twilio").twiml.MessagingResponse; // Added
 
 const app = express();
 
@@ -1270,6 +1271,37 @@ router.post("/retail-orchestrator", verifyUser, async (req, res) => {
   }
 });
 
+/**
+ * POST /api/whatsapp - Twilio WhatsApp webhook endpoint
+ */
+router.post("/whatsapp", async (req, res) => {
+  try {
+    const incomingMsg = req.body.Body || "";
+    console.log("📥 WhatsApp incoming:", incomingMsg);
+
+    // hard-bind a customer for demo (cust_001 = Arjun)
+    const result = await runRetailOrchestrator(
+      incomingMsg,
+      "cust_001",          // change based on phone mapping later
+      "whatsapp"
+    );
+
+    const twiml = new MessagingResponse();
+    twiml.message(result.reply);
+    
+    res.type("text/xml");
+    res.send(twiml.toString());
+
+  } catch (err) {
+    console.error("❌ WhatsApp webhook error:", err);
+    const twiml = new MessagingResponse();
+    twiml.message("Oops! Something broke — try again.");
+
+    res.type("text/xml");
+    res.send(twiml.toString());
+  }
+});
+
 router.get("/health", async (req, res) => {
   try {
     const { error: dbError } = await supabase
@@ -1315,6 +1347,7 @@ app.get("/", (req, res) => {
     endpoints: {
       auth: "/api/me (GET)",
       chat: "/api/retail-orchestrator (POST)",
+      whatsapp: "/api/whatsapp (POST)",
       cart: "/api/cart (GET, POST, DELETE)",
       products: "/api/products (GET)",
       health: "/api/health (GET)"
@@ -1322,9 +1355,6 @@ app.get("/", (req, res) => {
     documentation: "See README for API usage"
   });
 });
-
-
-
 
 // Error handling
 app.use((req, res) => {
@@ -1364,6 +1394,7 @@ app.listen(PORT, HOST, async () => {
    POST /api/cart            - Add to cart (requires auth)
    GET  /api/cart            - View cart (requires auth)
    POST /api/retail-orchestrator - Chat endpoint (requires auth)
+   POST /api/whatsapp        - WhatsApp webhook
    GET  /api/products        - Browse products
 ────────────────────────────────────────
   `);

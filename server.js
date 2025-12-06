@@ -1325,12 +1325,14 @@ router.post("/cart", verifyUser, async (req, res) => {
         .single();
       
       cart.push({
-        sku,
-        qty,
-        price,
-        name: product?.name || "Product",
-        added_at: new Date().toISOString()
-      });
+          sku,
+          qty,
+          price,
+          name: product?.name || "Product",
+          image: product?.image || null,
+          added_at: new Date().toISOString()
+              });
+
     }
 
     const updatedContext = {

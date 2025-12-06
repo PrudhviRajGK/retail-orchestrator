@@ -1320,7 +1320,7 @@ router.post("/cart", verifyUser, async (req, res) => {
     } else {
       const { data: product } = await supabase
         .from("products")
-        .select("name")
+        .select("name , image")
         .eq("sku", sku)
         .single();
       

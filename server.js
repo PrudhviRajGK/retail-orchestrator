@@ -6,6 +6,8 @@ const bodyParser = require("body-parser");
 const { createClient } = require('@supabase/supabase-js');
 const OpenAI = require("openai");
 const MessagingResponse = require("twilio").twiml.MessagingResponse;
+const { createJiraTicket } = require("./services/jira");
+
 
 const app = express();
 
@@ -717,7 +719,7 @@ Last channel: ${customer?.last_seen_channel || "unknown"}`
     const jsonText = response.choices[0].message.content;
     const parsed = JSON.parse(jsonText);
     
-    const validIntents = ["recommend", "check_inventory", "checkout", "post_purchase", "smalltalk"];
+    const validIntents = ["recommend", "check_inventory", "checkout", "post_purchase", "smalltalk" , "support_issue"];
     if (!validIntents.includes(parsed.intent)) {
       parsed.intent = "recommend";
     }
@@ -812,6 +814,28 @@ async function runRetailOrchestrator(user_query, customer_id, channel = "web") {
         }
         break;
 
+      case "support_issue":
+  console.log("🛠 Support issue detected — creating Jira ticket");
+
+  try {
+    const ticket = await createJiraTicket(
+      `Customer Issue - ${customer.name}`,
+      user_query
+    );
+
+    workerResult.support_ticket = ticket;
+
+    console.log("📌 Jira ticket created:", ticket);
+  } catch (err) {
+    console.error("❌ Failed to create Jira ticket:", err);
+    workerResult.support_ticket = {
+      success: false,
+      error: err.message
+    };
+  }
+  break;
+
+
       case "checkout":
         if (cart.length === 0) {
           workerResult.checkout = { error: "Cart is empty" };
@@ -855,6 +879,8 @@ async function runRetailOrchestrator(user_query, customer_id, channel = "web") {
               );
 
               await updateCustomerSpend(customer.id, loyalty.finalAmount);
+
+
 
               const fulfillment = fulfillmentAgent({
                 orderId,
@@ -1172,6 +1198,43 @@ router.get("/inventory/:sku", async (req, res) => {
   }
 });
 
+router.post("/support/create-ticket", async (req, res) => {
+  try {
+    const { summary, description } = req.body;
+
+    if (!summary || !description) {
+      return res.status(400).json({
+        success: false,
+        message: "summary and description required"
+      });
+    }
+
+    const result = await createJiraTicket(summary, description);
+
+    if (!result.success) {
+      return res.status(500).json({
+        success: false,
+        message: "Failed to create Jira ticket",
+        error: result.error
+      });
+    }
+
+    res.json({
+      success: true,
+      ticket_id: result.issueKey,
+      message: "Support ticket submitted successfully!"
+    });
+    
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: "Server error creating Jira ticket",
+      error: err.message
+    });
+  }
+});
+
+
 router.post("/cart", verifyUser, async (req, res) => {
   try {
     const authUserId = req.authUser.id;
@@ -1322,6 +1385,8 @@ router.post("/retail-orchestrator", verifyUser, async (req, res) => {
         structured: { error: "Missing or invalid user_query" }
       });
     }
+
+    
 
     const authUserId = req.authUser.id;
     const customer = await fetchCustomer(authUserId);

@@ -7,6 +7,8 @@ const { createClient } = require('@supabase/supabase-js');
 const OpenAI = require("openai");
 const MessagingResponse = require("twilio").twiml.MessagingResponse;
 const { createJiraTicket } = require("./services/jira");
+const { paymentOrder } = require("./services/payments");
+
 
 
 const app = express();
@@ -1233,6 +1235,58 @@ router.post("/support/create-ticket", async (req, res) => {
     });
   }
 });
+
+router.post("/payment/payment-order", async (req, res) => {
+  try {
+    const { amount } = req.body;
+
+    if (!amount) return res.status(400).json({ success: false, message: "Amount required" });
+
+    const order = await paymentOrder(amount);
+
+    res.json({
+      success: true,
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      razorpayKey: process.env.RAZORPAY_KEY_ID
+    });
+
+  } catch (err) {
+    console.error("Razorpay Order Error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to create order"
+    });
+  }
+});
+
+const crypto = require("crypto");
+
+router.post("/payment/verify", async (req, res) => {
+  try {
+    const { razorpay_payment_id, razorpay_order_id, razorpay_signature } = req.body;
+
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(body.toString())
+      .digest("hex");
+
+    const verified = expectedSignature === razorpay_signature;
+
+    if (verified) {
+      return res.json({ success: true, message: "Payment verified" });
+    }
+
+    res.json({ success: false, message: "Payment verification failed" });
+
+  } catch (err) {
+    res.status(500).json({ success: false, message: "Verification error" });
+  }
+});
+
 
 
 router.post("/cart", verifyUser, async (req, res) => {

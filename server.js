@@ -8,7 +8,9 @@ const OpenAI = require("openai");
 const MessagingResponse = require("twilio").twiml.MessagingResponse;
 const { createJiraTicket } = require("./services/jira");
 const { paymentOrder } = require("./services/payments");
+const crypto = require("crypto");
 
+const { generateQRToken, verifyQRToken } = require("./utils/qrcodeToken");
 
 
 const app = express();
@@ -1261,7 +1263,7 @@ router.post("/payment/payment-order", async (req, res) => {
   }
 });
 
-const crypto = require("crypto");
+
 
 router.post("/payment/verify", async (req, res) => {
   try {
@@ -1570,6 +1572,460 @@ router.post("/whatsapp", async (req, res) => {
   }
 });
 
+// ============================================================================
+// VECTOR SEARCH ENDPOINTS
+// ============================================================================
+
+/**
+ * POST /api/semantic-search - Vector similarity search
+ */
+router.post("/semantic-search", verifyUser, async (req, res) => {
+  try {
+    const { query, limit = 5 } = req.body;
+
+    if (!query || typeof query !== 'string') {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Query string is required" 
+      });
+    }
+
+    if (!openai) {
+      return res.status(500).json({
+        success: false,
+        message: "OpenAI not configured for embeddings"
+      });
+    }
+
+    console.log("🔍 Semantic search for query:", query);
+
+    // Generate query embedding
+    const embeddingResponse = await openai.embeddings.create({
+      model: "text-embedding-3-small",
+      input: query.trim(),
+    });
+
+    const queryEmbedding = embeddingResponse.data[0].embedding;
+
+    // Run vector match in Supabase
+    const { data, error } = await supabase.rpc("match_products", {
+      query_embedding: queryEmbedding,
+      match_threshold: 0.3, // Lower threshold for broader matches
+      match_count: parseInt(limit)
+    });
+
+    if (error) {
+      console.error("❌ Vector search error:", error);
+      return res.status(500).json({ 
+        success: false, 
+        message: "Vector search failed",
+        error: error.message 
+      });
+    }
+
+    console.log(`✅ Found ${data?.length || 0} vector matches`);
+
+    // If results are found, check inventory for availability
+    let enrichedResults = data || [];
+    if (enrichedResults.length > 0) {
+      // Get customer for location context
+      const authUserId = req.authUser.id;
+      const customer = await fetchCustomer(authUserId);
+      const storeLocation = customer?.store_location || "Mumbai";
+
+      // Check inventory for all matched products
+      const skuList = enrichedResults.map(p => p.sku);
+      const inventoryData = await checkInventory(skuList, storeLocation);
+      
+      // Create inventory map for quick lookup
+      const inventoryMap = {};
+      inventoryData.forEach(inv => {
+        inventoryMap[inv.sku] = {
+          inStock: inv.onlineStock > 0 || inv.storeStock > 0,
+          fulfillmentOptions: inv.fulfillmentOptions,
+          onlineStock: inv.onlineStock,
+          storeStock: inv.storeStock
+        };
+      });
+
+      // Enrich results with inventory info
+      enrichedResults = enrichedResults.map(product => ({
+        ...product,
+        availability: inventoryMap[product.sku] || {
+          inStock: false,
+          fulfillmentOptions: ["ship_to_home"]
+        },
+        similarity_score: product.similarity || 0
+      }));
+    }
+
+    res.json({
+      success: true,
+      query,
+      results: enrichedResults,
+      count: enrichedResults.length
+    });
+
+  } catch (err) {
+    console.error("❌ Semantic search exception:", err);
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error during semantic search",
+      error: err.message 
+    });
+  }
+});
+
+/**
+ * GET /api/similar/:sku - Find similar products by embedding
+ */
+router.get("/similar/:sku", async (req, res) => {
+  try {
+    const { sku } = req.params;
+    const { limit = 6 } = req.query;
+
+    console.log("🔍 Finding similar products for SKU:", sku);
+
+    // First, get the product and its embedding
+    const { data: product, error: productError } = await supabase
+      .from("products")
+      .select("embedding, name, category, price")
+      .eq("sku", sku)
+      .single();
+
+    if (productError || !product) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Product not found" 
+      });
+    }
+
+    if (!product.embedding) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "No embedding found for this product" 
+      });
+    }
+
+    // Find similar products using vector similarity
+    const { data, error } = await supabase.rpc("match_products", {
+      query_embedding: product.embedding,
+      match_threshold: 0.4, // Higher threshold for similar items
+      match_count: parseInt(limit) + 1 // +1 to exclude self
+    });
+
+    if (error) {
+      console.error("❌ Similar products error:", error);
+      return res.status(500).json({ 
+        success: false, 
+        message: "Similar products search failed",
+        error: error.message 
+      });
+    }
+
+    // Filter out the original product
+    const similarProducts = (data || [])
+      .filter(p => p.sku !== sku)
+      .slice(0, parseInt(limit))
+      .map(p => ({
+        ...p,
+        similarity_score: p.similarity || 0
+      }));
+
+    console.log(`✅ Found ${similarProducts.length} similar products`);
+
+    res.json({
+      success: true,
+      original_sku: sku,
+      original_name: product.name,
+      similar_products: similarProducts,
+      count: similarProducts.length
+    });
+
+  } catch (err) {
+    console.error("❌ Similar products exception:", err);
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error finding similar products",
+      error: err.message 
+    });
+  }
+});
+
+/**
+ * POST /api/concept-search - Advanced concept search with filters
+ */
+router.post("/concept-search", verifyUser, async (req, res) => {
+  try {
+    const { 
+      query, 
+      limit = 10,
+      min_price,
+      max_price,
+      category,
+      in_stock_only = false
+    } = req.body;
+
+    if (!query) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Query is required" 
+      });
+    }
+
+    if (!openai) {
+      return res.status(500).json({
+        success: false,
+        message: "OpenAI not configured"
+      });
+    }
+
+    console.log("🔍 Concept search with filters:", { query, category, min_price, max_price });
+
+    // Generate embedding for the query
+    const embeddingResponse = await openai.embeddings.create({
+      model: "text-embedding-3-small",
+      input: query.trim(),
+    });
+
+    const queryEmbedding = embeddingResponse.data[0].embedding;
+
+    // Get customer for location context
+    const authUserId = req.authUser.id;
+    const customer = await fetchCustomer(authUserId);
+    const storeLocation = customer?.store_location || "Mumbai";
+
+    // First, get vector matches
+    const { data: vectorMatches, error: vectorError } = await supabase.rpc("match_products", {
+      query_embedding: queryEmbedding,
+      match_threshold: 0.25, // Lower threshold for broader concept matching
+      match_count: 50 // Get more results for filtering
+    });
+
+    if (vectorError) {
+      console.error("❌ Vector search error:", vectorError);
+      return res.status(500).json({ 
+        success: false, 
+        message: "Concept search failed",
+        error: vectorError.message 
+      });
+    }
+
+    if (!vectorMatches || vectorMatches.length === 0) {
+      return res.json({
+        success: true,
+        query,
+        results: [],
+        count: 0,
+        message: "No matching products found"
+      });
+    }
+
+    // Get SKUs from vector matches
+    const skuList = vectorMatches.map(p => p.sku);
+    
+    // Build base query for filtering
+    let queryBuilder = supabase
+      .from("products")
+      .select("*")
+      .in("sku", skuList);
+
+    // Apply filters
+    if (category) {
+      queryBuilder = queryBuilder.eq("category", category);
+    }
+    if (min_price) {
+      queryBuilder = queryBuilder.gte("price", parseFloat(min_price));
+    }
+    if (max_price) {
+      queryBuilder = queryBuilder.lte("price", parseFloat(max_price));
+    }
+
+    const { data: filteredProducts, error: filterError } = await queryBuilder;
+
+    if (filterError) {
+      console.error("❌ Filter error:", filterError);
+      return res.status(500).json({ 
+        success: false, 
+        message: "Failed to apply filters",
+        error: filterError.message 
+      });
+    }
+
+    // Check inventory if needed
+    let finalResults = filteredProducts || [];
+    if (in_stock_only && finalResults.length > 0) {
+      const inventoryData = await checkInventory(
+        finalResults.map(p => p.sku),
+        storeLocation
+      );
+      
+      const inventoryMap = {};
+      inventoryData.forEach(inv => {
+        inventoryMap[inv.sku] = (inv.onlineStock > 0 || inv.storeStock > 0);
+      });
+
+      finalResults = finalResults.filter(p => inventoryMap[p.sku]);
+    }
+
+    // Sort by original similarity score from vector matches
+    const similarityMap = {};
+    vectorMatches.forEach(p => {
+      similarityMap[p.sku] = p.similarity || 0;
+    });
+
+    finalResults.sort((a, b) => {
+      const scoreA = similarityMap[a.sku] || 0;
+      const scoreB = similarityMap[b.sku] || 0;
+      return scoreB - scoreA;
+    });
+
+    // Limit results
+    finalResults = finalResults.slice(0, parseInt(limit));
+
+    // Enrich with availability
+    if (finalResults.length > 0) {
+      const inventoryData = await checkInventory(
+        finalResults.map(p => p.sku),
+        storeLocation
+      );
+      
+      const inventoryMap = {};
+      inventoryData.forEach(inv => {
+        inventoryMap[inv.sku] = {
+          inStock: inv.onlineStock > 0 || inv.storeStock > 0,
+          fulfillmentOptions: inv.fulfillmentOptions,
+          onlineStock: inv.onlineStock,
+          storeStock: inv.storeStock
+        };
+      });
+
+      finalResults = finalResults.map(product => ({
+        ...product,
+        availability: inventoryMap[product.sku] || {
+          inStock: false,
+          fulfillmentOptions: ["ship_to_home"]
+        },
+        similarity_score: similarityMap[product.sku] || 0
+      }));
+    }
+
+    console.log(`✅ Concept search returned ${finalResults.length} products`);
+
+    res.json({
+      success: true,
+      query,
+      filters_applied: {
+        category,
+        price_range: min_price || max_price ? `${min_price || '0'}-${max_price || '∞'}` : null,
+        in_stock_only
+      },
+      results: finalResults,
+      count: finalResults.length
+    });
+
+  } catch (err) {
+    console.error("❌ Concept search exception:", err);
+    res.status(500).json({ 
+      success: false, 
+      message: "Server error during concept search",
+      error: err.message 
+    });
+  }
+});
+
+/**
+ * GET /api/qr-login-token - Generate QR token for kiosk login
+ */
+router.get("/qr-login-token", verifyUser, async (req, res) => {
+  try {
+    const authUserId = req.authUser.id;
+    
+    const token = generateQRToken(authUserId);
+
+    res.json({
+      success: true,
+      token,
+      qrUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/kiosk-login?token=${token}`,
+      expires_in: "5 minutes"
+    });
+
+  } catch (err) {
+    console.error("❌ QR token generation error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to generate QR login token"
+    });
+  }
+});
+
+/**
+ * POST /api/qr-login-verify - Verify QR token for kiosk login
+ */
+router.post("/qr-login-verify", async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: "QR token is required"
+      });
+    }
+
+    // Decode QR token
+    const userId = verifyQRToken(token);
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: "QR token invalid or expired"
+      });
+    }
+
+    // Fetch customer by kiosk token identity
+    const customer = await fetchCustomerById(userId);
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer profile not found"
+      });
+    }
+
+    // Fetch supabase auth record using stored auth_user_id
+    const { data: userData, error: userError } =
+      await supabase.auth.admin.getUserById(customer.auth_user_id);
+
+    if (userError || !userData?.user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found in auth"
+      });
+    }
+
+    return res.json({
+      success: true,
+      user: {
+        id: userData.user.id,
+        email: userData.user.email,
+        name: customer.name || "Customer",
+        loyalty_tier: customer.loyalty_tier || "bronze",
+        store_location: customer.store_location || "Mumbai"
+      },
+      session_token: token // front-end will store this as logged-in kiosk session
+    });
+
+  } catch (err) {
+    console.error("❌ QR login verification error:", err);
+    res.status(500).json({
+      success: false,
+      message: "QR login verification failed"
+    });
+  }
+});
+ 
+
 router.get("/health", async (req, res) => {
   try {
     const { error: dbError } = await supabase
@@ -1587,12 +2043,30 @@ router.get("/health", async (req, res) => {
       }
     }
 
+    // Check vector search function
+    let vectorSearchStatus = "not_available";
+    try {
+      const { error: rpcError } = await supabase.rpc('match_products', {
+        query_embedding: Array(1536).fill(0), // dummy embedding
+        match_count: 1
+      }).limit(0);
+      
+      if (rpcError && rpcError.message.includes('function') && rpcError.message.includes('does not exist')) {
+        vectorSearchStatus = "function_not_created";
+      } else {
+        vectorSearchStatus = "available";
+      }
+    } catch (err) {
+      vectorSearchStatus = "error: " + err.message;
+    }
+
     res.json({
       status: "healthy",
       timestamp: new Date().toISOString(),
       services: {
         database: dbError ? "error: " + dbError.message : "connected",
         openai: openaiStatus,
+        vector_search: vectorSearchStatus,
         express: "running"
       },
       environment: process.env.NODE_ENV || "development"
@@ -1612,12 +2086,26 @@ app.get("/", (req, res) => {
     name: "Retail Orchestrator API",
     version: "1.0.0",
     status: "running",
+    ai_features: {
+      semantic_search: "Available",
+      similar_products: "Available",
+      concept_search: "Available"
+    },
     endpoints: {
       auth: "/api/me (GET)",
       chat: "/api/retail-orchestrator (POST)",
       whatsapp: "/api/whatsapp (POST)",
       cart: "/api/cart (GET, POST, DELETE)",
       products: "/api/products (GET)",
+      ai_search: {
+        semantic_search: "/api/semantic-search (POST)",
+        similar_products: "/api/similar/:sku (GET)",
+        concept_search: "/api/concept-search (POST)"
+      },
+      qr_login: {
+        get_token: "/api/qr-login-token (GET)",
+        verify: "/api/qr-login-verify (POST)"
+      },
       health: "/api/health (GET)"
     },
     documentation: "See README for API usage"

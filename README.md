@@ -66,7 +66,8 @@ link :https://www.youtube.com/watch?v=m_o3T-n3gVw
 - **Razorpay** - Payment processing
 - **Jira** - Support ticket management
 - **Vector Database** - pgvector for semantic search
-
+- **ROVO**
+- 
 ### Libraries
 - `@supabase/supabase-js` - Database client
 - `openai` - AI completions and embeddings
